@@ -169,8 +169,8 @@ run();
 
 modify("bob",user)
 print(get_hash())
-username1 = "a"*29+": The flag is pwn.college{8XjYOPCknO37pHNXYD2BU11WIvd.0VN3gjNxwSM4E"
-username2 = "a"*29
+username1 = "a"*70+": The flag is pwn.college{"
+username2 = "a"*70
 modify(user,username2)
 time.sleep(5)
 print(get_hash())
