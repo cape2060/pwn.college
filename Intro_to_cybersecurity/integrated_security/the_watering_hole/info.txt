@@ -1,0 +1,10 @@
+compiled shellcode2.s using command:
+	$ gcc -nostdlib -static shellcode2.s -o shellcode
+dumped the bytes from .text section:
+	$ objcopy --dump-section .text=shellcode_raw shellcode
+
+#instead of doing this you can also use buildin function pwn pentools which is asm
+	eg:
+	asm("""
+		xor rsi, rsi
+	""")
