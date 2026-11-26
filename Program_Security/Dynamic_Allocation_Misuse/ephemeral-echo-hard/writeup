@@ -1,0 +1,224 @@
+# pwn.college: Ephemeral Echo (Easy) Writeup
+
+## Introduction
+
+The goal of this challenge is to exploit the program and redirect its execution to the `win()` function.
+
+Instead of directly overwriting the return address, I used heap manipulation to leak memory addresses, bypass ASLR, and eventually overwrite the saved return address.
+
+My exploit consists of four main stages:
+
+1. Leak the PIE base address.
+2. Leak a stack address.
+3. Use tcache poisoning to allocate memory at the saved return address.
+4. Overwrite the saved return address with the address of `win()`.
+
+Let's go through each stage.
+
+## 1. Understanding the echo functionality
+
+The program provides several commands to interact with heap allocations, such as:
+
+- `malloc`: Allocate memory.
+- `free`: Free an allocated chunk.
+- `read`: Write data into an allocation.
+- `echo`: Display data from an allocation.
+- `puts`: Print data from an allocation.
+
+The interesting part is the `echo` functionality. By controlling its offset, I can read data beyond the intended contents of an allocation.
+
+This gives me an opportunity to disclose memory that would otherwise be inaccessible.
+
+## 2. Leaking the PIE base address
+
+Since the binary uses PIE (Position Independent Executable), its base address changes whenever the program starts.
+
+I first allocate several chunks and free some of them:
+
+```python
+malloc(io, 0, 32)
+malloc(io, 1, 32)
+malloc(io, 2, 32)
+malloc(io, 3, 32)
+malloc(io, 4, 32)
+
+free(io, 1)
+free(io, 2)
+free(io, 3)
+```
+
+After freeing these chunks, I use the `echo` command with an offset of 96 to leak a pointer from memory.
+
+```python
+echo(io, 0, 96)
+```
+
+I save the leaked value as `d`.
+
+Next, I manipulate the heap metadata using the `read` command. The purpose is to poison the tcache freelist and eventually make an allocation return an address associated with the binary's internal data.
+
+After performing the necessary allocations and freeing the appropriate chunk, I use:
+
+```python
+echo(io, 5, 0)
+```
+
+This gives me a pointer to the `/bin/echo` string stored inside the binary.
+
+Because I know the offset of this string inside the ELF file, I can calculate the PIE base:
+
+```python
+base = leaked_address - next(elf.search(b"/bin/echo"))
+```
+
+Now I have the binary's base address and can calculate addresses of its functions and other symbols.
+
+## 3. Leaking a stack address
+
+The next step is to find the location of the saved return address on the stack.
+
+I reuse the same heap manipulation technique from the previous stage.
+
+However, this time I use:
+
+```python
+echo(io, 5, 8)
+```
+
+This allows me to obtain another leaked pointer, which corresponds to a stack address.
+
+I store this leaked address in `s`.
+
+### Calculating the return address offset
+
+I need to overwrite the saved return address, but I don't know its absolute address because of ASLR.
+
+Fortunately, I don't need its absolute address beforehand. I only need the relative offset between the leaked stack address and the saved return address.
+
+I calculate this offset using:
+
+```python
+data_add = 0x00007fffe08a70b2
+rbp = 0x7fffe08a7220
+
+ret = rbp + 8
+offset = ret - data_add
+```
+
+Here, `rbp + 8` represents the location of the saved return address in the stack frame.
+
+The hardcoded addresses are only reference addresses used to calculate the relative offset. They are not used directly as the final exploit target.
+
+Once I have the offset, I can calculate the actual return address using the leaked stack address:
+
+```python
+target = s + offset
+```
+
+This allows me to find the saved return address dynamically.
+
+## 4. Tcache poisoning
+
+Now that I have both the PIE base and the stack address, I can prepare the final overwrite.
+
+I allocate three chunks of 24 bytes:
+
+```python
+malloc(io, 0, 24)
+malloc(io, 1, 24)
+malloc(io, 2, 24)
+```
+
+Then I free the second and third chunks:
+
+```python
+free(io, 1)
+free(io, 2)
+```
+
+These chunks are placed into the tcache bin corresponding to this allocation size.
+
+The important thing about tcache is that freed chunks contain freelist metadata. In particular, they contain a pointer to the next free chunk.
+
+By corrupting this metadata, I can influence where the next allocation will return memory.
+
+I use the following payload:
+
+```python
+payload = (
+    b"\x00" * 24 +
+    p64(0x21) +
+    b"\x00" * 24 +
+    p64(0x21) +
+    p64(s + offset)
+)
+
+read(io, 0, len(payload), payload)
+```
+
+The payload overwrites heap metadata and places my target address into the freelist structure.
+
+The important part is:
+
+```python
+p64(s + offset)
+```
+
+This is the address of the saved return address that I calculated earlier.
+
+After corrupting the freelist, I request two more allocations:
+
+```python
+malloc(io, 3, 24)
+malloc(io, 4, 24)
+```
+
+The second allocation is intended to return the address I poisoned into the freelist.
+
+I can now use the `read` command to write directly to the saved return address.
+
+## 5. Overwriting the saved return address
+
+Since I already recovered the PIE base, I can obtain the runtime address of the `win()` function:
+
+```python
+elf.address = base
+```
+
+Then I overwrite the saved return address:
+
+```python
+read(io, 4, 8, p64(elf.sym.win))
+```
+
+Now, instead of returning to its original caller, the program will return to `win()`.
+
+Finally, I send the quit command:
+
+```python
+quit(io)
+```
+
+This causes the program to exit through the normal return path, which triggers the overwritten return address.
+
+As a result, execution is redirected to `win()`.
+
+## Final Exploit
+
+The complete exploit combines all these steps:
+
+1. Use heap manipulation to leak a pointer into the binary.
+2. Calculate the PIE base using the known `/bin/echo` string offset.
+3. Repeat the heap manipulation to leak a stack address.
+4. Calculate the relative offset to the saved return address.
+5. Poison the tcache freelist to make an allocation return the saved return address.
+6. Overwrite it with `win()`.
+7. Trigger the function return using `quit`.
+
+## Conclusion
+
+This challenge helped me understand how different exploitation techniques can be combined to achieve code execution.
+
+The most interesting part was using heap corruption not only to manipulate allocations but also to obtain information about the binary and stack.
+
+By combining information disclosure, PIE bypass, stack address leakage, and tcache poisoning, I was able to overwrite the saved return address and redirect program execution to the `win()` function.
